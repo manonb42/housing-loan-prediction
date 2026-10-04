@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from housing_loan_prediction.preprocessing import TARGET, clean, find_rare_msa
+from housing_loan_prediction.preprocessing import TARGET, clean, find_frequent_counties, find_rare_msa
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
@@ -17,9 +17,9 @@ def load_raw(data_dir=DATA_DIR):
 
 
 def load_clean(data_dir=DATA_DIR):
-    """Renvoie (train_clean, test_clean, y), nettoyés avec les mêmes zones MSA rares."""
+    """Renvoie (train_clean, test_clean, y), nettoyés avec les mêmes zones MSA et comtés rares."""
     train, test = load_raw(data_dir)
-    rare_msa = find_rare_msa(train)
-    train_clean = clean(train, rare_msa, is_train=True)
-    test_clean = clean(test, rare_msa)
+    rare_msa, frequent_counties = find_rare_msa(train), find_frequent_counties(train)
+    train_clean = clean(train, rare_msa, frequent_counties, is_train=True)
+    test_clean = clean(test, rare_msa, frequent_counties)
     return train_clean, test_clean, train_clean[TARGET]
