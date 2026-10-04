@@ -43,8 +43,11 @@ OUTSIDE_STATES = {"GU": "Territoire hors États", "VI": "Territoire hors États"
 MSA_OUTSIDE = 99999
 RARE_THRESHOLD = 30
 
+# Tranches de debt_to_income_ratio -> centre de la tranche (les valeurs 36 à 49 sont déjà des nombres)
+DTI_TRANCHES = {"<20%": 10, "20%-<30%": 25, "30%-<36%": 33, "50%-60%": 55, ">60%": 65}
+
 # Nouvelles variables
-NEW_NUM_COLS = ["loan_to_property", "loan_to_income"]
+NEW_NUM_COLS = ["loan_to_property", "loan_to_income", "dti_numeric"]
 FLAG_COLS = [
     "has_coapplicant", "applicant_not_person",
     "ltv_missing", "property_value_missing", "income_missing", "loan_term_missing", "tract_unknown",
@@ -77,24 +80,41 @@ def find_rare_msa(train, threshold=RARE_THRESHOLD):
     return set(counts[counts < threshold].index)
 
 
+def find_frequent_counties(train, threshold=RARE_THRESHOLD):
+    """Comtés d'au moins `threshold` dossiers dans le train (comptage seul, sans la cible).
+
+    On garde la liste des comtés fréquents plutôt que celle des rares : un comté du test
+    absent du train est ainsi regroupé lui aussi.
+    """
+    counts = train["county_code"].value_counts()
+    return set(counts[counts >= threshold].index)
+
+
 def categorical_columns(df):
     """Toutes les colonnes explicatives qui ne sont ni numériques ni des indicateurs."""
     excluded = set(NUM_COLS) | set(FLAG_COLS) | {ID_COL, TARGET}
     return [col for col in df.columns if col not in excluded]
 
 
-def clean(df, rare_msa, is_train=False):
+def clean(df, rare_msa, frequent_counties, is_train=False):
     """Applique toutes les corrections et recodages décidés pendant l'exploration.
 
-    `rare_msa` vient de `find_rare_msa(train)`, pour que le train et le test soient recodés pareil.
-    Avec `is_train=True`, les 4 dossiers aberrants du train sont retirés ; le test n'est jamais filtré.
+    `rare_msa` et `frequent_counties` viennent de `find_rare_msa(train)` et
+    `find_frequent_counties(train)`, pour que le train et le test soient recodés pareil.
+    Avec `is_train=True`, les 5 dossiers aberrants du train sont retirés ; le test n'est jamais filtré.
     """
     out = df.copy()
 
-    # Étape 4 : dossiers aberrants (LTV jusqu'à 600 millions, revenu de 71 M$)
+    # Étape 4 : dossiers aberrants (LTV jusqu'à 600 millions, revenu de 71 M$, bien estimé à 1,58 Md$
+    # pour un prêt de 62 M$ alors que le LTV déclaré est de 51 %)
     if is_train:
-        absurd = (out["loan_to_value_ratio"] > 1000) | (out["income"] == 71000)
+        absurd = (
+            (out["loan_to_value_ratio"] > 1000) | (out["income"] == 71000) | (out["property_value"] > 1e9)
+        )
         out = out[~absurd].copy()
+
+    # Âge médian du bâti à -1 (5 dossiers du train, 1 du test) : valeur impossible, passée à NaN
+    out.loc[out["tract_median_age_of_housing_units"] == -1, "tract_median_age_of_housing_units"] = np.nan
 
     # Étape 3 : indicateurs construits avant tout recodage des colonnes de profil
     no_coapp_votes = sum((out[col] == code).astype(int) for col, code in NO_COAPP_CODES.items())
@@ -107,7 +127,7 @@ def clean(df, rare_msa, is_train=False):
     is_fraction = (ltv < 1.5) & ((ltv * 100 - ratio).abs() < 10)
     out.loc[is_fraction, "loan_to_value_ratio"] = ltv[is_fraction] * 100
 
-    # Étape 3 : quartier inconnu, toutes les variables de quartier à 0
+    # Étape 3 : quartier inconnu (population à 0), toutes les variables de quartier passées à NaN
     out[TRACT_COLS] = out[TRACT_COLS].astype(float)
     tract_unknown = out["tract_population"] == 0
     out.loc[tract_unknown, TRACT_COLS] = np.nan
@@ -132,10 +152,18 @@ def clean(df, rare_msa, is_train=False):
     out["co-applicant_race-1"] = out["co-applicant_race-1"].fillna(6).replace(COAPPLICANT_RACE_MERGE)
     out["state_code"] = out["state_code"].replace(OUTSIDE_STATES)
     out.loc[out["derived_msa-md"].isin(rare_msa), "derived_msa-md"] = MSA_OUTSIDE
+    county = out["county_code"]
+    rare_county = county.notna() & ~county.isin(frequent_counties)
+    out["county_code"] = county.astype("Int64").astype("string").astype(object)
+    out.loc[rare_county, "county_code"] = "Autre comté " + out.loc[rare_county, "state_code"].fillna("?").astype(str)
 
     # Étape 4 : ratios
     out["loan_to_property"] = out["loan_amount"] / out["property_value"] * 100
     out["loan_to_income"] = out["loan_amount"] / (out["income"].where(out["income"] > 0) * 1000)
+
+    # DTI en nombre ordonné (centre de chaque tranche), pour les arbres ; NaN si non renseigné
+    dti = out["debt_to_income_ratio"]
+    out["dti_numeric"] = dti.map(DTI_TRANCHES).fillna(pd.to_numeric(dti, errors="coerce"))
 
     # Indicateurs de manquants pour les modèles linéaires (validés après l'étape 4)
     out["ltv_missing"] = out["loan_to_value_ratio"].isna().astype(int)
@@ -198,7 +226,8 @@ def build_linear_preprocessor(df, drop=DROP_SURE):
     Catégorielles : one-hot ; une modalité du test absente du train donne une ligne de zéros.
     `df` sert seulement à lister les colonnes (sortie de `clean`).
     """
-    log_cols, num_cols, flag_cols, cat_cols = feature_columns(df, drop)
+    # Le DTI reste en one-hot : son lien avec l'acceptation est en U inversé, qu'une seule pente ne capte pas
+    log_cols, num_cols, flag_cols, cat_cols = feature_columns(df, [*drop, "dti_numeric"])
     log_pipeline = make_pipeline(
         SimpleImputer(strategy="median"),
         FunctionTransformer(log1p_positive, feature_names_out="one-to-one"),
@@ -221,7 +250,8 @@ def build_tree_preprocessor(df, drop=DROP_SURE):
     Numériques et indicateurs : inchangés, les NaN sont gérés directement par les arbres.
     Catégorielles : un entier par modalité ; une modalité du test absente du train vaut -1.
     """
-    log_cols, num_cols, flag_cols, cat_cols = feature_columns(df, drop)
+    # Le DTI passe en nombre ordonné : l'arbre retrouve lui-même les seuils de la courbe en U
+    log_cols, num_cols, flag_cols, cat_cols = feature_columns(df, [*drop, "debt_to_income_ratio"])
     return ColumnTransformer([
         ("num", "passthrough", log_cols + num_cols + flag_cols),
         ("cat", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), cat_cols),
