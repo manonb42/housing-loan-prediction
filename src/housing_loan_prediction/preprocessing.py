@@ -15,7 +15,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
+from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, OrdinalEncoder, StandardScaler
 
 TARGET = "accepted"
 ID_COL = "id"
@@ -211,4 +211,18 @@ def build_linear_preprocessor(df, drop=DROP_SURE):
         ("num", num_pipeline, num_cols),
         ("flag", "passthrough", flag_cols),
         ("cat", OneHotEncoder(handle_unknown="ignore"), cat_cols),
+    ])
+
+
+def build_tree_preprocessor(df, drop=DROP_SURE):
+    """Transformations pour les arbres (arbre de décision, forêt aléatoire).
+
+    Un arbre ne coupe que sur l'ordre des valeurs : ni log, ni bornage, ni centrage-réduction.
+    Numériques et indicateurs : inchangés, les NaN sont gérés directement par les arbres.
+    Catégorielles : un entier par modalité ; une modalité du test absente du train vaut -1.
+    """
+    log_cols, num_cols, flag_cols, cat_cols = feature_columns(df, drop)
+    return ColumnTransformer([
+        ("num", "passthrough", log_cols + num_cols + flag_cols),
+        ("cat", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), cat_cols),
     ])
