@@ -23,6 +23,6 @@ def make_submission(model, train_clean, y, test_clean, path):
 if __name__ == "__main__":
     train_clean, test_clean, y = load_clean()
     model = build_model(train_clean, DROP_SURE, "lasso").set_params(logisticregression__C=BEST_C)
-    submission = make_submission(model, train_clean, y, test_clean, DATA_DIR / "submission_lasso_drop_sure.csv")
+    submission = make_submission(model, train_clean, y, test_clean, DATA_DIR.parent / "submissions" / "lasso_drop_sure.csv")
     print(submission.shape)
     print(submission[TARGET].describe())
