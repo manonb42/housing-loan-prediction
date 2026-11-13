@@ -179,7 +179,7 @@ def learning_rate_grid():
     return configs, styles
 
 
-def check_submission(submission, oof_proba, y):
+def check_submission(submission, oof_proba, y, compare_paths=COMPARE_PATHS):
     """Contrôles avant envoi : format, valeurs, et cohérence des prédictions du test avec celles du train."""
     sample = pd.read_csv(DATA_DIR / "sample_submission.csv")
     proba = submission[TARGET]
@@ -197,7 +197,7 @@ def check_submission(submission, oof_proba, y):
     print(f"    taux d'acceptation réel du train : {y.mean():.3f}")
 
     print("\n  Accord avec les soumissions précédentes (corrélation des rangs, Spearman) :")
-    for name, path in COMPARE_PATHS.items():
+    for name, path in compare_paths.items():
         if path.exists():
             other = pd.read_csv(path).set_index(ID_COL)[TARGET].reindex(submission[ID_COL])
             print(f"    {name} : {proba.corr(pd.Series(other.to_numpy(), index=proba.index), method='spearman'):.3f}")
