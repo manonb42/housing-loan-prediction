@@ -22,6 +22,15 @@ LINEAR_C_GRID = [0.0003, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1]
 
 
 def build_linear_svm(train_clean, C=1.0):
+    """Build a linear SVM with its preprocessing.
+
+    Args:
+        train_clean: Cleaned training set.
+        C: Inverse of the regularization strength.
+
+    Returns:
+        Pipeline of the linear preprocessing and the LinearSVC.
+    """
     return make_pipeline(
         build_linear_preprocessor(train_clean, drop=DROP_SURE),
         LinearSVC(C=C, max_iter=5000),
@@ -29,6 +38,15 @@ def build_linear_svm(train_clean, C=1.0):
 
 
 def run_linear(train_clean, y):
+    """Tune C of the linear SVM by cross-validation and print the results.
+
+    Args:
+        train_clean: Cleaned training set.
+        y: Target.
+
+    Returns:
+        Fitted GridSearchCV.
+    """
     search = tune_auc(build_linear_svm(train_clean), {LINEAR_C_PARAM: LINEAR_C_GRID}, train_clean, y)
     print(f"SVM linéaire : meilleur C = {search.best_params_[LINEAR_C_PARAM]}")
     report_grid(search, LINEAR_C_PARAM)

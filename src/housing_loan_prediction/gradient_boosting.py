@@ -27,7 +27,7 @@ from housing_loan_prediction.data import DATA_DIR, load_clean
 from housing_loan_prediction.evaluation import RANDOM_STATE, make_cv
 from housing_loan_prediction.preprocessing import DROP_SURE, ID_COL, TARGET, build_tree_preprocessor, feature_columns
 
-MAX_CATEGORIES = 255  # limite du mode catégoriel natif
+MAX_CATEGORIES = 255
 CURVE_MAX_ITER = 1000
 FIGURES_DIR = Path(__file__).resolve().parents[2] / "figures"
 
@@ -35,12 +35,10 @@ MAX_LEAF_NODES_GRID = [15, 31, 63]
 MIN_SAMPLES_LEAF_GRID = [20, 100]
 GRID_MAX_ITER = 400
 
-# Un pas k fois plus petit demande environ k fois plus d'arbres
 LEARNING_RATE_MAX_ITER = {0.1: 300, 0.05: 600, 0.02: 1500}
 LR_MAX_LEAF_NODES_GRID = [63, 127]
 
-# Retenu par la grille (AUC CV max 0.9151 à 369 arbres) ; un peu plus d'arbres pour le modèle final,
-# appris sur tout le train (25 % de dossiers en plus qu'un pli), le plateau étant large
+# Best CV AUC at 369 trees; a few more trees for the final model, fitted on 25% more applications
 BEST_GB = {"learning_rate": 0.02, "max_leaf_nodes": 63, "max_iter": 400}
 SUBMISSION_PATH = DATA_DIR.parent / "submissions" / "gradient_boosting.csv"
 COMPARE_PATHS = {"forêt": DATA_DIR.parent / "submissions" / "random_forest.csv",
@@ -52,7 +50,15 @@ TEXT_MUTED = "#6b6a63"
 
 
 def categorical_mask(train_clean, drop=DROP_SURE):
-    """Colonnes de sortie de `build_tree_preprocessor` à traiter en catégoriel natif."""
+    """Flag the columns to treat as native categorical features.
+
+    Args:
+        train_clean: Cleaned training set.
+        drop: Columns to leave out.
+
+    Returns:
+        Boolean array over the output columns of `build_tree_preprocessor`.
+    """
     log_cols, num_cols, flag_cols, cat_cols = feature_columns(train_clean, [*drop, "debt_to_income_ratio"])
     n_num = len(log_cols + num_cols + flag_cols)
     native = [train_clean[col].nunique() <= MAX_CATEGORIES for col in cat_cols]
@@ -60,6 +66,15 @@ def categorical_mask(train_clean, drop=DROP_SURE):
 
 
 def build_gb(train_clean, **params):
+    """Build a HistGradientBoosting model with its preprocessing.
+
+    Args:
+        train_clean: Cleaned training set.
+        **params: Parameters of HistGradientBoostingClassifier.
+
+    Returns:
+        Pipeline of the tree preprocessing and the gradient boosting.
+    """
     params = {"early_stopping": False, "random_state": RANDOM_STATE, **params}
     return make_pipeline(
         build_tree_preprocessor(train_clean, drop=DROP_SURE),
@@ -68,13 +83,33 @@ def build_gb(train_clean, **params):
 
 
 def staged_auc(model, X, y):
-    """AUC après 1, 2, ..., M arbres, sans réapprendre le modèle."""
+    """Compute the AUC after each added tree.
+
+    Args:
+        model: Fitted pipeline from `build_gb`.
+        X: Data to evaluate.
+        y: Target.
+
+    Returns:
+        Array of the AUC after 1, 2, ..., M trees.
+    """
     X_t = model[0].transform(X)
     return np.array([roc_auc_score(y, s) for s in model[-1].staged_decision_function(X_t)])
 
 
 def learning_curve(train_clean, y, max_iter=CURVE_MAX_ITER, with_train=True, **params):
-    """AUC train et validation en fonction du nombre d'arbres, pour chacun des 5 plis."""
+    """Compute the AUC against the number of trees on each fold.
+
+    Args:
+        train_clean: Cleaned training set.
+        y: Target.
+        max_iter: Number of trees.
+        with_train: Whether to also compute the AUC on the training folds.
+        **params: Parameters of HistGradientBoostingClassifier.
+
+    Returns:
+        Tuple (train_curves, val_curves), arrays of shape (folds, trees).
+    """
     train_curves, val_curves = [], []
     for k, (tr, va) in enumerate(make_cv().split(train_clean, y)):
         model = build_gb(train_clean, max_iter=max_iter, **params).fit(train_clean.iloc[tr], y[tr])
@@ -87,6 +122,16 @@ def learning_curve(train_clean, y, max_iter=CURVE_MAX_ITER, with_train=True, **p
 
 
 def report_curve(train_curves, val_curves, checkpoints=(50, 100, 200, 300, 500, 750, 1000)):
+    """Print the best validation AUC and the AUC at a few numbers of trees.
+
+    Args:
+        train_curves: Training AUC of each fold.
+        val_curves: Validation AUC of each fold.
+        checkpoints: Numbers of trees to print.
+
+    Returns:
+        Number of trees with the best mean validation AUC.
+    """
     val_mean, val_std = val_curves.mean(axis=0), val_curves.std(axis=0)
     best = val_mean.argmax()
     print(f"  -> AUC CV maximale = {val_mean[best]:.4f} (+/- {val_std[best]:.4f}) à {best + 1} arbres")
@@ -98,6 +143,14 @@ def report_curve(train_curves, val_curves, checkpoints=(50, 100, 200, 300, 500, 
 
 
 def plot_curve(train_curves, val_curves, title, path):
+    """Plot the training and validation AUC against the number of trees.
+
+    Args:
+        train_curves: Training AUC of each fold.
+        val_curves: Validation AUC of each fold.
+        title: Title of the figure.
+        path: Path of the image.
+    """
     n_trees = np.arange(1, train_curves.shape[1] + 1)
     val_mean, val_std = val_curves.mean(axis=0), val_curves.std(axis=0)
     best = val_mean.argmax()
@@ -125,7 +178,16 @@ def plot_curve(train_curves, val_curves, title, path):
 
 
 def run_grid(train_clean, y, configs):
-    """Courbe d'apprentissage (validation seulement) pour chaque réglage ; on compare les maximums."""
+    """Compute the validation curve of each setting of a grid.
+
+    Args:
+        train_clean: Cleaned training set.
+        y: Target.
+        configs: List of parameter dictionaries.
+
+    Returns:
+        Dictionary from the label of each setting to its validation curves.
+    """
     results = {}
     for params in configs:
         label = ", ".join(f"{k} = {v}" for k, v in params.items() if k != "max_iter")
@@ -141,7 +203,14 @@ def run_grid(train_clean, y, configs):
 
 
 def plot_grid(results, styles, title, path):
-    """Courbes de validation moyennes de la grille ; `styles` donne (couleur, trait, légende) par réglage."""
+    """Plot the mean validation curve of each setting of a grid.
+
+    Args:
+        results: Output of `run_grid`.
+        styles: (color, line style, legend) of each setting.
+        title: Title of the figure.
+        path: Path of the image.
+    """
     fig, ax = plt.subplots(figsize=(8, 4.5))
     for (label, val_curves), (color, ls, legend) in zip(results.items(), styles):
         mean = val_curves.mean(axis=0)
@@ -161,6 +230,11 @@ def plot_grid(results, styles, title, path):
 
 
 def tree_size_grid():
+    """Build the grid on the tree size.
+
+    Returns:
+        Tuple (configs, styles) for `run_grid` and `plot_grid`.
+    """
     configs, styles = [], []
     for i, max_leaf_nodes in enumerate(MAX_LEAF_NODES_GRID):
         for min_samples_leaf, ls in zip(MIN_SAMPLES_LEAF_GRID, ["-", "--"]):
@@ -171,6 +245,11 @@ def tree_size_grid():
 
 
 def learning_rate_grid():
+    """Build the grid on the learning rate and the tree size.
+
+    Returns:
+        Tuple (configs, styles) for `run_grid` and `plot_grid`.
+    """
     configs, styles = [], []
     for i, (learning_rate, max_iter) in enumerate(LEARNING_RATE_MAX_ITER.items()):
         for max_leaf_nodes, ls in zip(LR_MAX_LEAF_NODES_GRID, ["-", "--"]):
@@ -180,7 +259,14 @@ def learning_rate_grid():
 
 
 def check_submission(submission, oof_proba, y, compare_paths=COMPARE_PATHS):
-    """Contrôles avant envoi : format, valeurs, et cohérence des prédictions du test avec celles du train."""
+    """Print checks on a submission before handing it in.
+
+    Args:
+        submission: DataFrame of the submission.
+        oof_proba: Out-of-fold probabilities of the same model on the training set.
+        y: Target.
+        compare_paths: Previous submissions to compare with.
+    """
     sample = pd.read_csv(DATA_DIR / "sample_submission.csv")
     proba = submission[TARGET]
     print("\n  Format :")
@@ -204,7 +290,14 @@ def check_submission(submission, oof_proba, y, compare_paths=COMPARE_PATHS):
 
 
 def write_submission(train_clean, test_clean, y, path=SUBMISSION_PATH):
-    """Contrôle hors pli du réglage final, puis apprentissage sur tout le train et écriture des probabilités."""
+    """Fit the retained gradient boosting on the whole training set and write its test predictions.
+
+    Args:
+        train_clean: Cleaned training set.
+        test_clean: Cleaned test set.
+        y: Target.
+        path: Path of the submission file.
+    """
     oof_proba = cross_val_predict(build_gb(train_clean, **BEST_GB), train_clean, y, cv=make_cv(),
                                   method="predict_proba")[:, 1]
     print(f"  AUC hors pli du réglage final ({BEST_GB['max_iter']} arbres) : {roc_auc_score(y, oof_proba):.4f}")

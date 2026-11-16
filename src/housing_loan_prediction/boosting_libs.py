@@ -37,25 +37,38 @@ OOF_DIR = ROOT / "oof"
 LEARNING_RATE = 0.05
 MAX_TREES = 2000
 
-# Tailles d'arbres comparables à celle retenue pour HistGradientBoosting (63 feuilles)
 PARAMS = {
     "lightgbm": {"num_leaves": 63, "min_child_samples": 20},
-    "catboost": {},  # réglages par défaut : 1000 arbres symétriques de profondeur 6, L2 = 3, pas choisi par CatBoost
+    "catboost": {},
 }
 CATBOOST_DEFAULT_TREES = 1000
 COLORS = {"lightgbm": "#2a78d6", "catboost": "#1baf7a"}
 
 
 def split_columns(train_clean):
-    """Mêmes variables que la forêt et HistGB (DROP_SURE, DTI en nombre) ; catégorielles à part."""
+    """Split the explanatory columns into numerical and categorical ones.
+
+    Args:
+        train_clean: Cleaned training set.
+
+    Returns:
+        Tuple (numerical columns, categorical columns).
+    """
     log_cols, num_cols, flag_cols, cat_cols = feature_columns(train_clean, [*DROP_SURE, "debt_to_income_ratio"])
     return log_cols + num_cols + flag_cols, cat_cols
 
 
 def make_frames(train_clean, test_clean, lib):
-    """Numériques telles quelles (NaN gérés par les arbres) ; catégorielles en `category` (LightGBM)
-    ou en texte (CatBoost). Les modalités sont celles du train : une modalité inconnue du test devient
-    NaN (LightGBM) ou "nan" (CatBoost)."""
+    """Format the training and test sets for LightGBM or CatBoost.
+
+    Args:
+        train_clean: Cleaned training set.
+        test_clean: Cleaned test set.
+        lib: "lightgbm" or "catboost".
+
+    Returns:
+        Tuple (X_train, X_test, categorical columns).
+    """
     num_cols, cat_cols = split_columns(train_clean)
     frames = []
     for df in (train_clean, test_clean):
@@ -69,22 +82,51 @@ def make_frames(train_clean, test_clean, lib):
 
 
 def max_trees(lib):
+    """Get the number of trees of the learning curve.
+
+    Args:
+        lib: "lightgbm" or "catboost".
+
+    Returns:
+        Number of trees.
+    """
     return CATBOOST_DEFAULT_TREES if lib == "catboost" else MAX_TREES
 
 
 def build_model(lib, cat_cols, n_trees=None):
+    """Build a LightGBM or CatBoost classifier.
+
+    Args:
+        lib: "lightgbm" or "catboost".
+        cat_cols: Categorical columns.
+        n_trees: Number of trees, `max_trees(lib)` by default.
+
+    Returns:
+        Unfitted classifier.
+    """
     n_trees = n_trees or max_trees(lib)
     common = {"learning_rate": LEARNING_RATE, "random_state": RANDOM_STATE}
     if lib == "lightgbm":
         return LGBMClassifier(n_estimators=n_trees, verbose=-1, **common, **PARAMS[lib])
-    # Pas de learning_rate : CatBoost le choisit selon la taille des données et le nombre d'arbres.
-    # use_best_model=False : le pli de validation sert à tracer la courbe, pas à arrêter l'apprentissage
+    # No learning_rate: CatBoost sets it from the data size and the number of trees
     return CatBoostClassifier(iterations=n_trees, cat_features=cat_cols, eval_metric="AUC", use_best_model=False,
                               verbose=0, thread_count=-1, random_seed=RANDOM_STATE, **PARAMS[lib])
 
 
 def fit_with_curve(model, lib, X_tr, y_tr, X_va, y_va):
-    """Apprend le modèle et renvoie l'AUC de validation après chaque arbre."""
+    """Fit a model and compute its validation AUC after each tree.
+
+    Args:
+        model: Classifier from `build_model`.
+        lib: "lightgbm" or "catboost".
+        X_tr: Training data.
+        y_tr: Training target.
+        X_va: Validation data.
+        y_va: Validation target.
+
+    Returns:
+        Array of the validation AUC after each tree.
+    """
     if lib == "lightgbm":
         model.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], eval_metric="auc")
         return np.array(model.evals_result_["valid_0"]["auc"])
@@ -93,14 +135,31 @@ def fit_with_curve(model, lib, X_tr, y_tr, X_va, y_va):
 
 
 def predict(model, lib, X, n_trees):
-    """Probabilité d'acceptation en n'utilisant que les `n_trees` premiers arbres."""
+    """Predict the probability of acceptance with the first trees only.
+
+    Args:
+        model: Fitted classifier.
+        lib: "lightgbm" or "catboost".
+        X: Data to predict.
+        n_trees: Number of trees to use.
+
+    Returns:
+        Array of probabilities.
+    """
     if lib == "lightgbm":
         return model.predict_proba(X, num_iteration=n_trees)[:, 1]
     return model.predict_proba(X, ntree_end=n_trees)[:, 1]
 
 
 def run_curves(lib, train_clean, test_clean, y):
-    """Courbe d'apprentissage sur 5 plis, nombre d'arbres retenu, prédictions hors pli enregistrées."""
+    """Compute the learning curve on the 5 folds and save the out-of-fold predictions.
+
+    Args:
+        lib: "lightgbm" or "catboost".
+        train_clean: Cleaned training set.
+        test_clean: Cleaned test set.
+        y: Target.
+    """
     X, _, cat_cols = make_frames(train_clean, test_clean, lib)
     curves, models, folds = [], [], list(make_cv().split(X, y))
     for k, (tr, va) in enumerate(folds):
@@ -133,7 +192,7 @@ def run_curves(lib, train_clean, test_clean, y):
 
 
 def plot_curves():
-    """Courbes de validation moyennes de LightGBM et CatBoost, avec le meilleur HistGB pour repère."""
+    """Plot the mean validation curves of LightGBM and CatBoost."""
     fig, ax = plt.subplots(figsize=(8, 4.5))
     best_auc = 0
     for lib, color in COLORS.items():
@@ -162,8 +221,14 @@ def plot_curves():
 
 
 def write_submission(lib, train_clean, test_clean, y):
-    """Apprend sur tout le train avec un peu plus d'arbres que le maximum de la courbe (25 % de dossiers
-    en plus qu'un pli, plateau large), comme pour HistGB."""
+    """Fit a model on the whole training set and write its test predictions.
+
+    Args:
+        lib: "lightgbm" or "catboost".
+        train_clean: Cleaned training set.
+        test_clean: Cleaned test set.
+        y: Target.
+    """
     curves = np.load(OOF_DIR / f"{lib}_curves.npy")
     n_trees = int(round(1.1 * (curves.mean(axis=0).argmax() + 1)))
     X, X_test, cat_cols = make_frames(train_clean, test_clean, lib)

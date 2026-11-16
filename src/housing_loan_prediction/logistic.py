@@ -31,6 +31,16 @@ DROP_SETS = {
 
 
 def build_model(train_clean, drop, penalty):
+    """Build a logistic regression with its preprocessing.
+
+    Args:
+        train_clean: Cleaned training set.
+        drop: Columns to leave out.
+        penalty: Key of `PENALTIES` ("sans pénalité", "ridge" or "lasso").
+
+    Returns:
+        Pipeline of the linear preprocessing and the logistic regression.
+    """
     return make_pipeline(
         build_linear_preprocessor(train_clean, drop=drop),
         LogisticRegression(max_iter=2000, **PENALTIES[penalty]),
@@ -38,7 +48,14 @@ def build_model(train_clean, drop, penalty):
 
 
 def coefs_by_variable(model):
-    """Nombre de coefficients et de coefficients non nuls par variable d'origine (une modalité = un coef)."""
+    """Count the coefficients and the non-zero coefficients of each original variable.
+
+    Args:
+        model: Fitted pipeline from `build_model`.
+
+    Returns:
+        DataFrame with the columns n_coefs and n_nonzero, one row per variable.
+    """
     preprocessor, logreg = model[0], model[-1]
     variables = []
     for name, transformer, columns in preprocessor.transformers_:
@@ -54,6 +71,17 @@ def coefs_by_variable(model):
 
 
 def run_tuned(train_clean, y, drop_name, penalty):
+    """Tune C by cross-validation and print the results.
+
+    Args:
+        train_clean: Cleaned training set.
+        y: Target.
+        drop_name: Key of `DROP_SETS`.
+        penalty: Key of `PENALTIES`.
+
+    Returns:
+        Fitted GridSearchCV.
+    """
     model = build_model(train_clean, DROP_SETS[drop_name], penalty)
     search = tune_auc(model, {C_PARAM: C_GRID}, train_clean, y)
     print(f"\n{penalty}, {drop_name} : meilleur C = {search.best_params_[C_PARAM]}")
@@ -63,6 +91,12 @@ def run_tuned(train_clean, y, drop_name, penalty):
 
 
 def report_selection(name, model):
+    """Print the variables set to zero by a lasso.
+
+    Args:
+        name: Label of the model.
+        model: Fitted pipeline from `build_model`.
+    """
     coefs = coefs_by_variable(model)
     unused = coefs.index[coefs["n_nonzero"] == 0].tolist()
     print(f"\n{name} : {coefs['n_nonzero'].sum()} coefficients non nuls sur {coefs['n_coefs'].sum()}")

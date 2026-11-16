@@ -40,12 +40,20 @@ MAX_FEATURES_GRID = ["sqrt", 0.2, 0.33]
 MIN_SAMPLES_LEAF_GRID = [1, 5, 20]
 N_TREES_GRID = [50, 100, 200, 400]
 
-# Retenus par la grille OOB (AUC CV = 0.9094) ; plus d'arbres pour la soumission, au-delà du plateau
 BEST_FOREST = {"max_features": 0.2, "min_samples_leaf": 20, "n_estimators": 500}
 SUBMISSION_PATH = DATA_DIR.parent / "submissions" / "random_forest.csv"
 
 
 def build_tree(train_clean, ccp_alpha=0.0):
+    """Build a decision tree with its preprocessing.
+
+    Args:
+        train_clean: Cleaned training set.
+        ccp_alpha: Cost-complexity pruning parameter.
+
+    Returns:
+        Pipeline of the tree preprocessing and the decision tree.
+    """
     return make_pipeline(
         build_tree_preprocessor(train_clean, drop=DROP_SURE),
         DecisionTreeClassifier(ccp_alpha=ccp_alpha, random_state=RANDOM_STATE),
@@ -53,6 +61,18 @@ def build_tree(train_clean, ccp_alpha=0.0):
 
 
 def build_forest(train_clean, max_features="sqrt", min_samples_leaf=1, n_estimators=N_TREES, **kwargs):
+    """Build a random forest with its preprocessing.
+
+    Args:
+        train_clean: Cleaned training set.
+        max_features: Fraction or rule for the number of variables drawn at each split.
+        min_samples_leaf: Minimum number of applications in a leaf.
+        n_estimators: Number of trees.
+        **kwargs: Other parameters of RandomForestClassifier.
+
+    Returns:
+        Pipeline of the tree preprocessing and the random forest.
+    """
     return make_pipeline(
         build_tree_preprocessor(train_clean, drop=DROP_SURE),
         RandomForestClassifier(
@@ -63,13 +83,30 @@ def build_forest(train_clean, max_features="sqrt", min_samples_leaf=1, n_estimat
 
 
 def oob_auc(forest, y):
-    """AUC calculée sur les prédictions out-of-bag (chaque dossier n'est prédit que par les arbres qui ne l'ont pas vu)."""
+    """Compute the AUC of the out-of-bag predictions of a forest.
+
+    Args:
+        forest: Fitted RandomForestClassifier with oob_score=True.
+        y: Target.
+
+    Returns:
+        Out-of-bag AUC.
+    """
     proba = forest.oob_decision_function_[:, 1]
     seen = ~np.isnan(proba)
     return roc_auc_score(y[seen], proba[seen])
 
 
 def run_tree(train_clean, y):
+    """Evaluate the full tree, then tune its pruning by cross-validation.
+
+    Args:
+        train_clean: Cleaned training set.
+        y: Target.
+
+    Returns:
+        Fitted GridSearchCV on ccp_alpha.
+    """
     full = build_tree(train_clean).fit(train_clean, y)[-1]
     print(f"Arbre complet : {full.get_n_leaves()} feuilles, profondeur {full.get_depth()}")
     report("\nArbre complet", cv_auc(build_tree(train_clean), train_clean, y))
@@ -84,7 +121,15 @@ def run_tree(train_clean, y):
 
 
 def run_forest_grid(train_clean, y):
-    """Grille max_features x min_samples_leaf, comparée sur l'AUC out-of-bag."""
+    """Compare the forests of the grid on their out-of-bag AUC.
+
+    Args:
+        train_clean: Cleaned training set.
+        y: Target.
+
+    Returns:
+        Best pair (max_features, min_samples_leaf).
+    """
     results = {}
     for max_features in MAX_FEATURES_GRID:
         for min_samples_leaf in MIN_SAMPLES_LEAF_GRID:
@@ -96,7 +141,14 @@ def run_forest_grid(train_clean, y):
 
 
 def run_n_trees(train_clean, y, max_features, min_samples_leaf):
-    """AUC out-of-bag selon le nombre d'arbres : on ajoute des arbres à la même forêt (warm_start)."""
+    """Print the out-of-bag AUC of a forest as trees are added.
+
+    Args:
+        train_clean: Cleaned training set.
+        y: Target.
+        max_features: Fraction or rule for the number of variables drawn at each split.
+        min_samples_leaf: Minimum number of applications in a leaf.
+    """
     model = build_forest(train_clean, max_features, min_samples_leaf, n_estimators=N_TREES_GRID[0], warm_start=True)
     for n_trees in N_TREES_GRID:
         model.set_params(randomforestclassifier__n_estimators=n_trees).fit(train_clean, y)
@@ -104,7 +156,14 @@ def run_n_trees(train_clean, y, max_features, min_samples_leaf):
 
 
 def write_submission(train_clean, test_clean, y, path=SUBMISSION_PATH):
-    """Apprend la meilleure forêt sur tout le train et écrit la probabilité d'acceptation de chaque dossier du test."""
+    """Fit the retained forest on the whole training set and write its test predictions.
+
+    Args:
+        train_clean: Cleaned training set.
+        test_clean: Cleaned test set.
+        y: Target.
+        path: Path of the submission file.
+    """
     model = build_forest(train_clean, **BEST_FOREST).fit(train_clean, y)
     print(f"Forêt finale : AUC OOB = {oob_auc(model[-1], y):.4f}")
     submission = pd.DataFrame({ID_COL: test_clean[ID_COL], TARGET: model.predict_proba(test_clean)[:, 1]})
