@@ -36,7 +36,7 @@ from housing_loan_prediction.svm import build_linear_svm
 from housing_loan_prediction.trees import BEST_FOREST, build_forest
 
 SUBMISSIONS = ROOT / "submissions"
-# nom du modèle -> (prédictions hors pli, prédictions test du modèle appris sur tout le train)
+# name -> (out-of-fold predictions, test predictions of the model fitted on the whole training set)
 CANDIDATES = {
     "catboost": (OOF_DIR / "catboost.csv", SUBMISSIONS / "catboost.csv"),
     "hist_gb": (OOF_DIR / "hist_gb.csv", SUBMISSIONS / "gradient_boosting.csv"),
@@ -44,19 +44,32 @@ CANDIDATES = {
     "lasso": (OOF_DIR / "lasso.csv", SUBMISSIONS / "lasso_drop_sure.csv"),
     "svm_lin": (OOF_DIR / "svm_lineaire.csv", SUBMISSIONS / "svm_lineaire.csv"),
 }
-SVM_C = 0.003  # meilleur C de la grille (svm.py) : AUC CV 0.8934
+SVM_C = 0.003
 GES_STEPS = 50
 EPS = 1e-6
 
 
 def build_svm(train_clean):
-    """SVM linéaire (C retenu par la grille de svm.py). Il ne donne qu'une distance à la frontière : la
-    calibration de Platt (sigmoïde apprise sur 3 sous-plis internes) la convertit en probabilité, pour
-    pouvoir la moyenner avec celles des autres modèles. L'ordre des dossiers, donc l'AUC, change à peine."""
+    """Build the linear SVM with Platt calibration.
+
+    Args:
+        train_clean: Cleaned training set.
+
+    Returns:
+        CalibratedClassifierCV around the linear SVM.
+    """
     return CalibratedClassifierCV(build_linear_svm(train_clean, C=SVM_C), method="sigmoid", cv=3)
 
 
 def base_models(train_clean):
+    """Build the base models whose out-of-fold predictions are computed here.
+
+    Args:
+        train_clean: Cleaned training set.
+
+    Returns:
+        Dictionary from the model name to its unfitted pipeline.
+    """
     return {
         "lasso": build_model(train_clean, DROP_SURE, "lasso").set_params(logisticregression__C=BEST_C),
         "random_forest": build_forest(train_clean, **BEST_FOREST),
@@ -66,8 +79,14 @@ def base_models(train_clean):
 
 
 def write_oof(train_clean, test_clean, y, names):
-    """Prédictions hors pli (mêmes 5 plis que les autres) ; pour le SVM, aussi la soumission sur le test
-    (lasso et forêt en ont déjà une)."""
+    """Write the out-of-fold predictions of the base models.
+
+    Args:
+        train_clean: Cleaned training set.
+        test_clean: Cleaned test set.
+        y: Target.
+        names: Names of the models to run.
+    """
     for name, model in base_models(train_clean).items():
         if name not in names:
             continue
@@ -83,35 +102,84 @@ def write_oof(train_clean, test_clean, y, names):
 
 
 def load_predictions(which, ids):
-    """Matrice (dossiers x modèles), lignes dans l'ordre de `ids` ; which = 0 (hors pli) ou 1 (test)."""
+    """Load the predictions of the candidate models.
+
+    Args:
+        which: 0 for the out-of-fold predictions, 1 for the test predictions.
+        ids: Ids giving the order of the rows.
+
+    Returns:
+        DataFrame with one column per model.
+    """
     cols = {}
     for name, paths in CANDIDATES.items():
         cols[name] = pd.read_csv(paths[which]).set_index(ID_COL)[TARGET].reindex(ids).to_numpy()
     return pd.DataFrame(cols)
 
 
-# --- Méthodes de combinaison : fit(P, y) renvoie une fonction P -> score ---
-
 def fit_best_single(P, y):
+    """Select the model with the best AUC.
+
+    Args:
+        P: Predictions, one column per model.
+        y: Target.
+
+    Returns:
+        Tuple (function from predictions to scores, weights).
+    """
     best = max(P.columns, key=lambda c: roc_auc_score(y, P[c]))
     return lambda Q: Q[best].to_numpy(), {best: 1.0}
 
 
 def fit_mean(P, y):
+    """Average the probabilities of all the models.
+
+    Args:
+        P: Predictions, one column per model.
+        y: Target, unused.
+
+    Returns:
+        Tuple (function from predictions to scores, weights).
+    """
     return lambda Q: Q.mean(axis=1).to_numpy(), {c: 1 / P.shape[1] for c in P.columns}
 
 
 def to_ranks(Q):
+    """Replace each column by its normalized ranks.
+
+    Args:
+        Q: Predictions, one column per model.
+
+    Returns:
+        DataFrame of ranks divided by the number of rows.
+    """
     return Q.apply(lambda col: rankdata(col) / len(col))
 
 
 def fit_rank_mean(P, y):
+    """Average the ranks of all the models.
+
+    Args:
+        P: Predictions, one column per model.
+        y: Target, unused.
+
+    Returns:
+        Tuple (function from predictions to scores, weights).
+    """
     return lambda Q: to_ranks(Q).mean(axis=1).to_numpy(), {c: 1 / P.shape[1] for c in P.columns}
 
 
 def fit_ges(P, y, steps=GES_STEPS):
-    """Greedy Ensemble Selection (Caruana et al., 2004) : à chaque étape on ajoute, avec remise, le modèle
-    qui maximise l'AUC de la moyenne courante. Poids = fréquence de sélection (positifs, somme 1)."""
+    """Fit a greedy ensemble selection (Caruana et al., 2004).
+
+    Args:
+        P: Predictions, one column per model.
+        y: Target.
+        steps: Number of greedy steps, with replacement.
+
+    Returns:
+        Tuple (function from predictions to scores, weights).
+    """
     X = P.to_numpy()
     counts, total = np.zeros(X.shape[1]), np.zeros(len(X))
     for t in range(steps):
@@ -124,7 +192,15 @@ def fit_ges(P, y, steps=GES_STEPS):
 
 
 def fit_logistic(P, y):
-    """Stacking : régression logistique (légère pénalité L2) sur les logits des probabilités."""
+    """Fit a logistic regression on the logits of the predictions.
+
+    Args:
+        P: Predictions, one column per model.
+        y: Target.
+
+    Returns:
+        Tuple (function from predictions to scores, coefficients).
+    """
     meta = LogisticRegression(C=1.0, max_iter=1000).fit(logit(P.clip(EPS, 1 - EPS)), y)
     return (lambda Q: meta.decision_function(logit(Q.clip(EPS, 1 - EPS))),
             dict(zip(P.columns, meta.coef_.ravel().round(3))))
@@ -140,6 +216,12 @@ METHODS = {
 
 
 def describe(P, y):
+    """Print the AUC of each model and the correlations of their predictions and residuals.
+
+    Args:
+        P: Out-of-fold predictions, one column per model.
+        y: Target.
+    """
     print("\n  AUC hors pli de chaque modèle :")
     for c in P.columns:
         print(f"    {c:<10} {roc_auc_score(y, P[c]):.4f}")
@@ -150,6 +232,12 @@ def describe(P, y):
 
 
 def compare(P, y):
+    """Print the meta-level cross-validated AUC of each combination method.
+
+    Args:
+        P: Out-of-fold predictions, one column per model.
+        y: Target.
+    """
     print("\n  Validation croisée au niveau du méta-modèle (combinaison apprise sur 4 plis, notée sur le 5e) :")
     folds = list(make_cv().split(P, y))
     for name, fit in METHODS.items():
@@ -165,8 +253,15 @@ def compare(P, y):
 
 
 def to_proba(method, score):
-    """Ramène le score combiné dans [0, 1] : sigmoïde pour le stacking logistique, rangs pour la moyenne
-    des rangs ; les autres méthodes sont déjà des moyennes de probabilités. L'ordre, donc l'AUC, ne change pas."""
+    """Map a combined score to [0, 1] without changing its order.
+
+    Args:
+        method: Name of the combination method.
+        score: Combined score.
+
+    Returns:
+        Probabilities, or normalized ranks for the rank mean.
+    """
     if method == "stacking logistique":
         return expit(score)
     if method == "moyenne des rangs":
@@ -183,6 +278,14 @@ SUBMISSION_NAMES = {
 
 
 def write_submission(method, P, y, test_clean):
+    """Fit a combination on the out-of-fold predictions and write its test predictions.
+
+    Args:
+        method: Name of the combination method, key of `METHODS`.
+        P: Out-of-fold predictions, one column per model.
+        y: Target.
+        test_clean: Cleaned test set.
+    """
     combine, weights = METHODS[method](P, y)
     print(f"\n=== {method} : poids {weights} ===")
     proba = to_proba(method, combine(load_predictions(1, test_clean[ID_COL])))
@@ -207,7 +310,6 @@ if __name__ == "__main__":
             describe(P, y)
             compare(P, y)
         if step == "submit":
-            # ex. : submit ges moyenne logistique (mot-clé contenu dans le nom de la méthode)
             for key in sys.argv[2:]:
                 method = next(m for m in SUBMISSION_NAMES if key.lower() in m.lower())
                 write_submission(method, P, y, test_clean)

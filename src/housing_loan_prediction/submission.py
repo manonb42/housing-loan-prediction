@@ -13,7 +13,18 @@ BEST_C = 0.3
 
 
 def make_submission(model, train_clean, y, test_clean, path):
-    """Entraîne `model` sur tout le train et écrit la probabilité que le prêt soit accordé."""
+    """Fit a model on the whole training set and write its test predictions.
+
+    Args:
+        model: Pipeline including its preprocessing.
+        train_clean: Cleaned training set.
+        y: Target.
+        test_clean: Cleaned test set.
+        path: Path of the submission file.
+
+    Returns:
+        DataFrame of the submission (id, probability of acceptance).
+    """
     model.fit(train_clean, y)
     submission = pd.DataFrame({ID_COL: test_clean[ID_COL], TARGET: model.predict_proba(test_clean)[:, 1]})
     submission.to_csv(path, index=False)
