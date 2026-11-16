@@ -27,7 +27,7 @@ from sklearn.model_selection import cross_val_predict
 
 from housing_loan_prediction.boosting_libs import OOF_DIR, ROOT
 from housing_loan_prediction.data import load_clean
-from housing_loan_prediction.evaluation import RANDOM_STATE, make_cv
+from housing_loan_prediction.evaluation import make_cv
 from housing_loan_prediction.gradient_boosting import BEST_GB, build_gb, check_submission
 from housing_loan_prediction.logistic import build_model
 from housing_loan_prediction.preprocessing import DROP_SURE, ID_COL, TARGET
@@ -147,15 +147,6 @@ def describe(P, y):
     print(pd.DataFrame(spearmanr(P)[0], index=P.columns, columns=P.columns).round(3).to_string())
     print("\n  Corrélation des résidus y - p (des modèles qui se trompent pareil n'apportent rien à l'ensemble) :")
     print((P.rsub(y, axis=0)).corr().round(3).to_string())
-
-
-def meta_oof(P, y, fit, seed=RANDOM_STATE):
-    """Score combiné hors pli au niveau méta : pour chaque pli, combinaison apprise sur les 4 autres."""
-    score = np.empty(len(y))
-    for tr, va in make_cv(random_state=seed).split(P, y):
-        combine, _ = fit(P.iloc[tr], y[tr])
-        score[va] = combine(P.iloc[va])
-    return score
 
 
 def compare(P, y):
